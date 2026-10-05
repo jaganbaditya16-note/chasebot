@@ -175,17 +175,24 @@ module.exports=async function handler(req,res){
       const inv=invoice(p[2]);if(!inv)return respond(res,404,{error:'Invoice not found'},id);if(inv.outstanding<=0)return respond(res,409,{error:'Invoice is already settled'},id);
       const b=await body(req),msg=txt(b.message);if(!msg)return respond(res,400,{error:'Message is required'},id);
       const intent=(await aiIntent(msg))||parse(msg),offer=decide(inv,intent),decisionId='DEC-'+crypto.randomUUID().slice(0,8).toUpperCase();
+      const offerToken=sign({kind:'offer',invoice:inv.id,analysisId:decisionId,intent,offer,exp:Date.now()+15*60*1000});
       audit('NEGOTIATION_ANALYZED',{invoiceId:inv.id,decisionId,intent,decision:offer.decision,reasons:offer.reasons});
-      return respond(res,200,{invoice:inv,decisionId,intent,offer,reply:reply(offer,intent),policy:inv.mandate},id);
+      return respond(res,200,{invoice:inv,decisionId,intent,offer,offerToken,reply:reply(offer,intent),policy:inv.mandate},id);
     }
     if(req.method==='POST'&&p[0]==='api'&&p[1]==='invoices'&&p[3]==='accept'){
       const inv=invoice(p[2]);if(!inv)return respond(res,404,{error:'Invoice not found'},id);if(inv.outstanding<=0)return respond(res,409,{error:'Invoice is already settled'},id);
-      const b=await body(req),intent=b.intent||parse(b.message||''),offer=decide(inv,intent);if(offer.decision==='blocked')return respond(res,409,{error:'Plan blocked by mandate',offer},id);
-      const decisionId=txt(b.decisionId,80)||'DEC-'+crypto.randomUUID().slice(0,8).toUpperCase();let order;
+      const b=await body(req);
+      const token=verify(b.offerToken);
+      if(!token||token.kind!=='offer'||token.invoice!==inv.id||!token.offer||!token.intent)return respond(res,400,{error:'Offer is missing, invalid or expired'},id);
+      const intent=token.intent,offer=decide(inv,intent);
+      const sameOffer=offer.decision===token.offer.decision&&offer.pct===token.offer.pct&&offer.n===token.offer.n&&offer.total===token.offer.total&&offer.parts.length===token.offer.parts.length&&offer.parts.every((v,i)=>v===token.offer.parts[i]);
+      if(!sameOffer)return respond(res,409,{error:'Offer changed; negotiate again before paying'},id);
+      if(offer.decision==='blocked')return respond(res,409,{error:'Plan blocked by mandate',offer},id);
+      const decisionId='SET-'+crypto.randomUUID().slice(0,8).toUpperCase();let order;
       if(process.env.PAYPAL_CLIENT_ID&&process.env.PAYPAL_CLIENT_SECRET)order=await createOrder(inv,offer,decisionId);
       if(!order)order=mockOrder(inv,offer,decisionId);
       audit('ORDER_CREATED',{invoiceId:inv.id,decisionId,orderId:order.id,amount:offer.parts[0],provider:order.id.startsWith('MOCK-')?'mock':'paypal-sandbox'});
-      return respond(res,200,{invoiceId:inv.id,decisionId,offer,provider:order.id.startsWith('MOCK-')?'mock':'paypal-sandbox',orders:[{id:order.id,url:order.links?.find(x=>x.rel==='approve')?.href||('/api/orders/'+order.id)}]},id);
+      return respond(res,200,{invoiceId:inv.id,settlementId:decisionId,offer,provider:order.id.startsWith('MOCK-')?'mock':'paypal-sandbox',orders:[{id:order.id,url:order.links?.find(x=>x.rel==='approve')?.href||('/api/orders/'+order.id)}]},id);
     }
     if(req.method==='GET'&&p.join('/')==='api/orders/return'){
       const state=verify(u.searchParams.get('state')),token=u.searchParams.get('token');if(!state||!token||!state.invoice)return respond(res,400,{error:'Invalid or expired payment state'},id);
