@@ -1,1 +1,9 @@
-{"name":"chasebot","version":"1.0.0","description":"Guardrailed AI collections agent that negotiates overdue invoices and settles them with PayPal","license":"MIT","type":"commonjs","engines":{"node":">=18"},"scripts":{"start":"node server.js","test":"node test.js"}}
+{
+  "name":"chasebot",
+  "version":"3.0.0",
+  "description":"AI payment negotiation firewall with PayPal Sandbox settlement",
+  "license":"MIT",
+  "type":"commonjs",
+  "engines":{"node":">=18"},
+  "scripts":{"start":"node server.js","test":"node test.js"}
+}
