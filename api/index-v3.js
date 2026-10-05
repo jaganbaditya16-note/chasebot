@@ -100,9 +100,14 @@ async function createOrder(inv,o,decisionId){
   const r=await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json','PayPal-Request-Id':decisionId},body:JSON.stringify({intent:'CAPTURE',purchase_units:[{reference_id:inv.id,custom_id:decisionId,description:'ChaseBot settlement '+inv.id,amount:{currency_code:'USD',value:o.parts[0].toFixed(2)}}],application_context:{brand_name:'ChaseBot',user_action:'PAY_NOW',return_url:app.replace(/\/$/,'')+'/api/orders/return?state='+encodeURIComponent(state),cancel_url:app.replace(/\/$/,'')+'/api/orders/cancel'}})});
   if(!r.ok)throw new Error('PayPal order creation failed ('+r.status+')');const order=await r.json();orders.set(order.id,{id:order.id,invoiceId:inv.id,amount:o.parts[0],complete:o.n===1,decisionId,provider:'paypal-sandbox'});return order;
 }
+async function getPayPalOrder(orderId){
+  const token=await paypalToken();if(!token)return null;
+  const r=await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders/'+encodeURIComponent(orderId),{headers:{authorization:'Bearer '+token,'content-type':'application/json'}});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error('PayPal order lookup failed ('+r.status+')');return j;
+}
 async function capture(orderId,expected){
-  const token=await paypalToken();if(!token)return null;const r=await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders/'+encodeURIComponent(orderId)+'/capture',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'}});
-  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error('PayPal capture failed ('+r.status+')');const c=Number(j?.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value);
+  const token=await paypalToken();if(!token)return null;const r=await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders/'+encodeURIComponent(orderId)+'/capture',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json','PayPal-Request-Id':'CHASE-CAPTURE-'+orderId}});
+  const j=await r.json().catch(()=>({}));if(!r.ok&&r.status!==422)throw new Error('PayPal capture failed ('+r.status+')');const c=Number(j?.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value);
   if(j.status!=='COMPLETED'||!Number.isFinite(c)||Math.abs(c-Number(expected))>.01)throw new Error('PayPal capture did not match the approved amount');return j;
 }
 function mockOrder(inv,o,decisionId){const id='MOCK-'+crypto.randomUUID();const state=sign({invoice:inv.id,amount:o.parts[0],complete:o.n===1,decisionId,orderId:id,exp:Date.now()+15*60*1000});orders.set(id,{id,invoiceId:inv.id,amount:o.parts[0],complete:o.n===1,decisionId,provider:'mock'});return {id,status:'CREATED',links:[{rel:'approve',href:'/api/orders/mock?state='+encodeURIComponent(state)}]}}
@@ -198,7 +203,16 @@ module.exports=async function handler(req,res){
       const state=verify(u.searchParams.get('state')),token=u.searchParams.get('token');if(!state||!token||!state.invoice)return respond(res,400,{error:'Invalid or expired payment state'},id);
       if(state.decisionId&&!orders.has(token))orders.set(token,{id:token,invoiceId:state.invoice,amount:state.amount,complete:!!state.complete,decisionId:state.decisionId,provider:'paypal-sandbox'});
       const inv=invoice(state.invoice);if(!inv)return respond(res,404,{error:'Invoice not found'},id);
-      if(!usedOrders.has(token)){await capture(token,state.amount);apply({id:token,invoiceId:state.invoice,amount:state.amount,complete:!!state.complete,decisionId:state.decisionId,provider:'paypal-sandbox'})}
+      if(!usedOrders.has(token)){
+        const current=await getPayPalOrder(token);
+        if(current.status==='COMPLETED'){
+          const captured=Number(current?.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value);
+          if(!Number.isFinite(captured)||Math.abs(captured-Number(state.amount))>.01)return respond(res,409,{error:'Completed PayPal amount does not match the approved offer'},id);
+        }else{
+          await capture(token,state.amount);
+        }
+        apply({id:token,invoiceId:state.invoice,amount:state.amount,complete:!!state.complete,decisionId:state.decisionId,provider:'paypal-sandbox'});
+      }
       return redirect(res,'/pay.html?success=1&invoice='+encodeURIComponent(inv.id)+'&order='+encodeURIComponent(token)+'&complete='+(state.complete?'1':'0'),id);
     }
     if(req.method==='GET'&&p.join('/')==='api/orders/cancel')return redirect(res,'/pay.html?cancelled=1',id);
