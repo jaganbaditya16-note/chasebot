@@ -72,6 +72,21 @@ PAYPAL_WEBHOOK_ID=your_registered_webhook_id
 
 Webhook endpoint: POST /api/webhooks/paypal
 
+
+## Submission-readiness checklist
+
+Before the Devpost submission, use **both** the real PayPal Sandbox and a real AI key in the hosted demo. Mock mode is the zero-cost development fallback, not the strongest judging configuration.
+
+1. Configure PayPal Sandbox credentials and a public HTTPS APP_URL.
+2. Configure the Gemini API key and model so the health panel shows AI as connected.
+3. Run `npm test` locally and confirm all regression tests pass.
+4. Open the dashboard and run the judge scenario plus the adversarial attack suite.
+5. Exercise the client negotiation → signed offer → PayPal Sandbox checkout → return/capture → ledger flow.
+6. Put complete setup/testing instructions and any sandbox test account details in the Devpost submission.
+7. Record a sub-three-minute YouTube demo that shows the product working end-to-end.
+8. Describe the significant v3 changes in the Devpost entry because this repository existed before the hackathon started.
+9. Keep the public GitHub repository licensed under the included MIT license and do not expose secrets.
+
 ## Architecture
 
 api/index-v3.js — AI adapter, policy firewall, PayPal Sandbox, mock checkout, webhook verification, rate limiting and audit ledger.
