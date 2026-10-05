@@ -8,7 +8,7 @@ const SEED = {
 };
 
 let invoices = clone(SEED);
-let audit = [];
+let auditLog = [];
 let orders = new Map();
 let usedOrders = new Set();
 let rateBuckets = new Map();
@@ -24,7 +24,6 @@ function redirect(res,to,id){res.statusCode=302;res.setHeader('location',to);res
 async function raw(req){if(typeof req.body==='string')return req.body;if(req.body&&typeof req.body==='object')return JSON.stringify(req.body);let s='';for await(const c of req)s+=c;return s}
 async function body(req){const s=await raw(req);try{return s?JSON.parse(s):{}}catch{return{}}}
 function audit(event,data={}){auditLog.push({id:rid(),at:new Date().toISOString(),event,...data});if(auditLog.length>300)auditLog=auditLog.slice(-300)}
-let auditLog=audit;
 
 function reset(){invoices=clone(SEED);auditLog=[];orders=new Map();usedOrders=new Set();rateBuckets=new Map()}
 function invoice(id){return invoices[id]||null}
