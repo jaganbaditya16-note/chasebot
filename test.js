@@ -22,10 +22,20 @@ function call(method,url,b){
   r=await call('POST','/api/invoices/INV-102/accept',{intent:{type:'discount',discountAsk:50,installmentsAsk:1},decisionId:'DEC-TEST'});
   assert.equal(r.code,200);assert.equal(r.json.offer.pct,6);assert.equal(r.json.offer.parts[0],601.6);assert.equal(r.json.provider,'mock');
 
-  r=await call('GET',r.json.orders[0].url);assert.equal(r.code,302);
+  const mockApproval=r.json.orders[0].url;
+  r=await call('GET',mockApproval);assert.equal(r.code,302);
   r=await call('GET','/api/invoices/INV-102');assert.equal(r.code,200);assert.equal(r.json.invoice.outstanding,0);
 
   r=await call('POST','/api/invoices/INV-102/accept',{intent:{type:'discount',discountAsk:1}});assert.equal(r.code,409);
+
+  // A signed mock approval cannot be modified in the browser.
+  r=await call('POST','/api/invoices/INV-103/accept',{intent:{type:'installments',discountAsk:0,installmentsAsk:2},decisionId:'DEC-TAMPER'});
+  assert.equal(r.code,200);
+  const goodApproval=r.json.orders[0].url;
+  const tamperedApproval=goodApproval.slice(0,-1)+(goodApproval.endsWith('a')?'b':'a');
+  r=await call('GET',tamperedApproval);assert.equal(r.code,400);
+
+  r=await call('GET','/api/demo/attack-suite');assert.equal(r.code,200);assert.equal(r.json.allBlocked,true);assert.equal(r.json.passed,r.json.total);
   r=await call('POST','/api/invoices/INV-101/negotiate',{message:'   '});assert.equal(r.code,400);
 
   r=await call('POST','/api/invoices/INV-104/negotiate',{message:'Can I get 25% off?'});assert.equal(r.code,200);assert.equal(r.json.offer.pct,0);assert.equal(r.json.offer.n,1);
