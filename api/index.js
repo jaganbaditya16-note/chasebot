@@ -82,7 +82,7 @@ function decide(invoice, intent) {
   const n = Math.min(askedN, m.maxInstallments);
   const discounted = money(invoice.outstanding * (1 - pct / 100));
   const minimumFirst = money(invoice.outstanding * (m.minFirstPaymentPct / 100));
-  const parts = Array.from({ length: n }, (_, i) => i === 0 ? 0 : 0);
+  const parts = Array.from({ length: n }, () => 0);
   if (n === 1) parts[0] = discounted;
   else {
     const first = Math.max(minimumFirst, money(discounted / n));
@@ -116,10 +116,12 @@ async function paypalToken() {
 async function createPayPalOrder(invoice, offer) {
   const token = await paypalToken();
   if (!token) return null;
+  const appUrl = process.env.APP_URL;
+  if (!appUrl) throw new Error('APP_URL is required for real PayPal sandbox checkout');
   const r = await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders', {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ intent: 'CAPTURE', purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }], application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${process.env.APP_URL || ''}/api/orders/return`, cancel_url: `${process.env.APP_URL || ''}/api/orders/cancel` } })
+    body: JSON.stringify({ intent: 'CAPTURE', purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }], application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${appUrl.replace(/\/$/, '')}/api/orders/return`, cancel_url: `${appUrl.replace(/\/$/, '')}/api/orders/cancel` } })
   });
   if (!r.ok) throw new Error(`PayPal order creation failed (${r.status})`);
   return await r.json();
@@ -135,7 +137,7 @@ async function capturePayPalOrder(orderId) {
 
 function mockOrder(invoice, offer) {
   const id = `MOCK-${crypto.randomUUID()}`;
-  mockOrders.set(id, { id, invoiceId: invoice.id, amount: offer.parts[0], status: 'CREATED' });
+  mockOrders.set(id, { id, invoiceId: invoice.id, amount: offer.parts[0], status: 'CREATED', complete: offer.n === 1 });
   return { id, status: 'CREATED', links: [{ rel: 'approve', href: `/api/orders/${id}` }] };
 }
 
@@ -178,25 +180,31 @@ async function handler(req, res) {
       return json(res, 200, { invoiceId: invoice.id, offer, orders: [{ id: order.id, url: approval }], provider: order.id.startsWith('MOCK-') ? 'mock' : 'paypal-sandbox' });
     }
 
+    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'return') {
+      const token = url.searchParams.get('token');
+      const invoiceId = url.searchParams.get('invoice');
+      if (token) await capturePayPalOrder(token);
+      if (invoiceId && invoices[invoiceId]) { invoices[invoiceId].outstanding = 0; addAudit('PAYMENT_CAPTURED', { invoiceId, orderId: token, provider: 'paypal-sandbox' }); }
+      return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(invoiceId || '')}&order=${encodeURIComponent(token || '')}`);
+    }
+
+    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'cancel') return redirect(res, '/pay.html?cancelled=1');
+
     if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2]) {
       const id = parts[2];
       const mock = mockOrders.get(id);
       if (mock) {
         const invoice = getInvoice(mock.invoiceId);
-        if (invoice && mock.status !== 'CAPTURED') { invoice.outstanding = money(invoice.outstanding - mock.amount); mock.status = 'CAPTURED'; addAudit('PAYMENT_CAPTURED', { invoiceId: invoice.id, orderId: id, amount: mock.amount, provider: 'mock' }); }
+        if (invoice && mock.status !== 'CAPTURED') {
+          invoice.outstanding = mock.complete ? 0 : money(invoice.outstanding - mock.amount);
+          mock.status = 'CAPTURED';
+          addAudit('PAYMENT_CAPTURED', { invoiceId: invoice.id, orderId: id, amount: mock.amount, provider: 'mock' });
+        }
         return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(mock.invoiceId)}&order=${encodeURIComponent(id)}`);
-      }
-      if (id === 'return') {
-        const token = url.searchParams.get('token');
-        const invoiceId = url.searchParams.get('invoice');
-        if (token) await capturePayPalOrder(token);
-        if (invoiceId && invoices[invoiceId]) { invoices[invoiceId].outstanding = 0; addAudit('PAYMENT_CAPTURED', { invoiceId, orderId: token, provider: 'paypal-sandbox' }); }
-        return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(invoiceId || '')}&order=${encodeURIComponent(token || '')}`);
       }
       return json(res, 404, { error: 'Order not found' });
     }
 
-    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'cancel') return redirect(res, '/pay.html?cancelled=1');
     return json(res, 404, { error: 'Route not found' });
   } catch (err) {
     console.error(err);
