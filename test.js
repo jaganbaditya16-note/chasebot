@@ -34,21 +34,22 @@ function call(method,url,b){
 
   r=await call('POST','/api/invoices/INV-102/accept',{intent:{type:'discount',discountAsk:1}});assert.equal(r.code,409);
 
-  // A signed mock approval cannot be modified in the browser.
-  r=await call('POST','/api/invoices/INV-103/accept',{intent:{type:'installments',discountAsk:0,installmentsAsk:2},decisionId:'DEC-TAMPER'});
-  assert.equal(r.code,200);
-  const goodApproval=r.json.orders[0].url;
-  const tamperedApproval=goodApproval.slice(0,-1)+(goodApproval.endsWith('a')?'b':'a');
-  r=await call('GET',tamperedApproval);assert.equal(r.code,400);
-
-  r=await call('GET','/api/demo/attack-suite');assert.equal(r.code,200);assert.equal(r.json.allBlocked,true);assert.equal(r.json.passed,r.json.total);
-  r=await call('POST','/api/invoices/INV-101/negotiate',{message:'   '});assert.equal(r.code,400);
-
+  // The signed offer and signed mock approval both reject tampering.
   r=await call('POST','/api/invoices/INV-103/negotiate',{message:'Split into 2 payments'});
   const validOfferToken=r.json.offerToken;
   const tamperedOfferToken=validOfferToken.slice(0,-1)+(validOfferToken.endsWith('a')?'b':'a');
   r=await call('POST','/api/invoices/INV-103/accept',{offerToken:tamperedOfferToken});
   assert.equal(r.code,400);
+
+  r=await call('POST','/api/invoices/INV-103/accept',{offerToken:validOfferToken});
+  assert.equal(r.code,200);
+  const goodApproval=r.json.orders[0].url;
+  const tamperedApproval=goodApproval.slice(0,-1)+(goodApproval.endsWith('a')?'b':'a');
+  r=await call('GET',tamperedApproval);assert.equal(r.code,400);
+  r=await call('GET',goodApproval);assert.equal(r.code,302);
+
+  r=await call('GET','/api/demo/attack-suite');assert.equal(r.code,200);assert.equal(r.json.allBlocked,true);assert.equal(r.json.passed,r.json.total);
+  r=await call('POST','/api/invoices/INV-101/negotiate',{message:'   '});assert.equal(r.code,400);
 
   r=await call('POST','/api/invoices/INV-104/negotiate',{message:'Can I get 25% off?'});assert.equal(r.code,200);assert.equal(r.json.offer.pct,0);assert.equal(r.json.offer.n,1);
 
