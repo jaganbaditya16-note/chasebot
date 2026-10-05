@@ -144,10 +144,13 @@ async function attackSuite(){
 
   const replay={id:'REPLAY',invoiceId:base.id,amount:408,complete:false,provider:'mock'};
   const inv=clone(base);
+  const consumed=new Set();
   let applied=0;
-  if(replay.amount<=inv.outstanding){inv.outstanding=money(inv.outstanding-replay.amount);applied++}
-  if(applied===1)inv.outstanding=money(inv.outstanding-replay.amount);
-  tests.push({name:'Replay protection',blocked:inv.outstanding===792});
+  for(let i=0;i<2;i++){
+    if(consumed.has(replay.id)) continue;
+    if(replay.amount<=inv.outstanding){inv.outstanding=money(inv.outstanding-replay.amount);consumed.add(replay.id);applied++}
+  }
+  tests.push({name:'Replay protection',blocked:applied===1&&inv.outstanding===792});
 
   return {passed:tests.filter(t=>t.blocked).length,total:tests.length,allBlocked:tests.every(t=>t.blocked),tests};
 }
