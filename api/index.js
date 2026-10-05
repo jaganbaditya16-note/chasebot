@@ -119,10 +119,11 @@ async function createPayPalOrder(invoice, offer) {
   const appUrl = process.env.APP_URL;
   if (!appUrl) throw new Error('APP_URL is required for real PayPal sandbox checkout');
   const baseUrl = appUrl.replace(/\/$/, '');
+  const returnParams = `invoice=${encodeURIComponent(invoice.id)}&amount=${encodeURIComponent(offer.parts[0].toFixed(2))}&complete=${offer.n === 1 ? '1' : '0'}`;
   const r = await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders', {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ intent: 'CAPTURE', purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }], application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${baseUrl}/api/orders/return?invoice=${encodeURIComponent(invoice.id)}`, cancel_url: `${baseUrl}/api/orders/cancel?invoice=${encodeURIComponent(invoice.id)}` } })
+    body: JSON.stringify({ intent: 'CAPTURE', purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }], application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${baseUrl}/api/orders/return?${returnParams}`, cancel_url: `${baseUrl}/api/orders/cancel?invoice=${encodeURIComponent(invoice.id)}` } })
   });
   if (!r.ok) throw new Error(`PayPal order creation failed (${r.status})`);
   return await r.json();
@@ -184,9 +185,14 @@ async function handler(req, res) {
     if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'return') {
       const token = url.searchParams.get('token');
       const invoiceId = url.searchParams.get('invoice');
+      const amount = Number(url.searchParams.get('amount') || 0);
+      const complete = url.searchParams.get('complete') === '1';
       if (token) await capturePayPalOrder(token);
-      if (invoiceId && invoices[invoiceId]) { invoices[invoiceId].outstanding = 0; addAudit('PAYMENT_CAPTURED', { invoiceId, orderId: token, provider: 'paypal-sandbox' }); }
-      return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(invoiceId || '')}&order=${encodeURIComponent(token || '')}`);
+      if (invoiceId && invoices[invoiceId]) {
+        invoices[invoiceId].outstanding = complete ? 0 : money(Math.max(0, invoices[invoiceId].outstanding - amount));
+        addAudit('PAYMENT_CAPTURED', { invoiceId, orderId: token, amount, complete, provider: 'paypal-sandbox' });
+      }
+      return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(invoiceId || '')}&order=${encodeURIComponent(token || '')}&complete=${complete ? '1' : '0'}`);
     }
 
     if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'cancel') return redirect(res, `/pay.html?cancelled=1&invoice=${encodeURIComponent(url.searchParams.get('invoice') || '')}`);
@@ -197,11 +203,11 @@ async function handler(req, res) {
       if (mock) {
         const invoice = getInvoice(mock.invoiceId);
         if (invoice && mock.status !== 'CAPTURED') {
-          invoice.outstanding = mock.complete ? 0 : money(invoice.outstanding - mock.amount);
+          invoice.outstanding = mock.complete ? 0 : money(Math.max(0, invoice.outstanding - mock.amount));
           mock.status = 'CAPTURED';
-          addAudit('PAYMENT_CAPTURED', { invoiceId: invoice.id, orderId: id, amount: mock.amount, provider: 'mock' });
+          addAudit('PAYMENT_CAPTURED', { invoiceId: invoice.id, orderId: id, amount: mock.amount, complete: mock.complete, provider: 'mock' });
         }
-        return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(mock.invoiceId)}&order=${encodeURIComponent(id)}`);
+        return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(mock.invoiceId)}&order=${encodeURIComponent(id)}&complete=${mock.complete ? '1' : '0'}`);
       }
       return json(res, 404, { error: 'Order not found' });
     }
