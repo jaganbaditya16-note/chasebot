@@ -155,7 +155,7 @@ async function attackSuite(){
   return {passed:tests.filter(t=>t.blocked).length,total:tests.length,allBlocked:tests.every(t=>t.blocked),tests};
 }
 
-function verifyWebhook(headers,event){
+async function verifyWebhook(headers,event){
   if(!process.env.PAYPAL_WEBHOOK_ID)return false;const token=await paypalToken();if(!token)return false;
   const r=await fetch('https://api-m.sandbox.paypal.com/v1/notifications/verify-webhook-signature',{method:'POST',headers:{authorization:'Bearer '+token,'content-type':'application/json'},body:JSON.stringify({auth_algo:headers['paypal-auth-algo'],cert_url:headers['paypal-cert-url'],transmission_id:headers['paypal-transmission-id'],transmission_sig:headers['paypal-transmission-sig'],transmission_time:headers['paypal-transmission-time'],webhook_id:process.env.PAYPAL_WEBHOOK_ID,webhook_event:event})});
   if(!r.ok)return false;const j=await r.json();return j.verification_status==='SUCCESS';
