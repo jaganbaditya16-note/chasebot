@@ -51,6 +51,15 @@ function call(method,url,b){
   r=await call('GET','/api/demo/attack-suite');assert.equal(r.code,200);assert.equal(r.json.allBlocked,true);assert.equal(r.json.passed,r.json.total);
   r=await call('POST','/api/invoices/INV-101/negotiate',{message:'   '});assert.equal(r.code,400);
 
+  // Best-effort per-instance rate limit trips after 20 negotiation requests.
+  await call('POST','/api/demo/reset');
+  let rateHit=false;
+  for(let i=0;i<21;i++){
+    const rr=await call('POST','/api/invoices/INV-101/negotiate',{message:'Can I get 1% off?'});
+    if(i===20)rateHit=rr.code===429;
+  }
+  assert(rateHit);
+
   r=await call('POST','/api/invoices/INV-104/negotiate',{message:'Can I get 25% off?'});assert.equal(r.code,200);assert.equal(r.json.offer.pct,0);assert.equal(r.json.offer.n,1);
 
   r=await call('GET','/api/overview');assert.equal(r.code,200);assert.equal(r.json.metrics.activeInvoices,4);assert(r.json.policy.controls.length>=5);
