@@ -215,7 +215,7 @@ module.exports=async function handler(req,res){
       const event=await body(req),valid=await verifyWebhook(req.headers||{},event);if(!valid){audit('WEBHOOK_REJECTED',{eventId:event?.id||null,type:event?.event_type||null});return respond(res,401,{error:'Webhook signature verification failed'},id)}
       if(auditLog.some(x=>x.event==='WEBHOOK_ACCEPTED'&&x.eventId===event.id))return respond(res,200,{ok:true,duplicate:true},id);
       audit('WEBHOOK_ACCEPTED',{eventId:event.id,type:event.event_type,summary:txt(event.summary,180)});
-      const orderId=event?.resource?.supplementary_data?.related_ids?.order_id;if(event.event_type==='PAYMENT.CAPTURE.COMPLETED'&&orderId&&orders.has(orderId))try{apply(orderId)}catch{}
+      const orderId=event?.resource?.supplementary_data?.related_ids?.order_id;if(event.event_type==='PAYMENT.CAPTURE.COMPLETED'&&orderId&&orders.has(orderId))try{apply(orders.get(orderId))}catch{}
       return respond(res,200,{ok:true},id);
     }
     return respond(res,404,{error:'Route not found'},id);
