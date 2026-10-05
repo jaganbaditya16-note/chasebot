@@ -5,8 +5,10 @@ const invoices = {
   'INV-102': { id: 'INV-102', client: 'Northstar Labs', amount: 640, outstanding: 640, due: '2026-09-20', mandate: { maxDiscountPct: 8, maxInstallments: 3, minFirstPaymentPct: 34 } }
 };
 
+// Demo-only state. A production system should persist invoices/audit/order state in a database.
 const audit = [];
 const mockOrders = new Map();
+const consumedOrders = new Set();
 
 function json(res, status, data) {
   res.statusCode = status;
@@ -30,6 +32,7 @@ async function readBody(req) {
 }
 
 function getInvoice(id) { return invoices[id] || null; }
+function money(n) { return Math.round(Number(n) * 100) / 100; }
 
 function parseIntent(message = '') {
   const text = String(message).toLowerCase();
@@ -40,7 +43,7 @@ function parseIntent(message = '') {
     type: discount ? 'discount' : wantsPlan ? 'installments' : 'general',
     discountAsk: discount ? Number(discount[1]) : 0,
     installmentsAsk: installments ? Number(installments[1]) : 1,
-    message: String(message)
+    message: String(message).slice(0, 1000)
   };
 }
 
@@ -54,8 +57,8 @@ async function llmIntent(message) {
     temperature: 0,
     response_format: { type: 'json_object' },
     messages: [
-      { role: 'system', content: 'Extract negotiation intent as JSON only: {"type":"discount|installments|general","discountAsk":number,"installmentsAsk":number}. Never decide an offer.' },
-      { role: 'user', content: message }
+      { role: 'system', content: 'Extract negotiation intent as JSON only: {"type":"discount|installments|general","discountAsk":number,"installmentsAsk":number}. Never decide an offer, never invent financial terms.' },
+      { role: 'user', content: String(message).slice(0, 1000) }
     ]
   };
   const controller = new AbortController();
@@ -67,17 +70,19 @@ async function llmIntent(message) {
     const content = data?.choices?.[0]?.message?.content;
     if (!content) return null;
     const parsed = JSON.parse(content);
-    return { type: parsed.type, discountAsk: Number(parsed.discountAsk || 0), installmentsAsk: Number(parsed.installmentsAsk || 1) };
+    const type = ['discount', 'installments', 'general'].includes(parsed.type) ? parsed.type : 'general';
+    const discountAsk = Number(parsed.discountAsk || 0);
+    const installmentsAsk = Number(parsed.installmentsAsk || 1);
+    if (!Number.isFinite(discountAsk) || !Number.isFinite(installmentsAsk)) return null;
+    return { type, discountAsk: Math.max(0, discountAsk), installmentsAsk: Math.max(1, installmentsAsk) };
   } catch { return null; }
   finally { clearTimeout(timer); }
 }
 
-function money(n) { return Math.round(Number(n) * 100) / 100; }
-
 function decide(invoice, intent) {
   const m = invoice.mandate;
-  const askedDiscount = Math.max(0, Number(intent.discountAsk || 0));
-  const askedN = Math.max(1, Math.floor(Number(intent.installmentsAsk || 1)));
+  const askedDiscount = Math.min(100, Math.max(0, Number(intent.discountAsk || 0)));
+  const askedN = Math.min(100, Math.max(1, Math.floor(Number(intent.installmentsAsk || 1))));
   const pct = Math.min(askedDiscount, m.maxDiscountPct);
   const n = Math.min(askedN, m.maxInstallments);
   const discounted = money(invoice.outstanding * (1 - pct / 100));
@@ -86,6 +91,7 @@ function decide(invoice, intent) {
   if (n === 1) parts[0] = discounted;
   else {
     const first = Math.max(minimumFirst, money(discounted / n));
+    if (first > discounted) return { pct: 0, n: 1, total: invoice.outstanding, parts: [invoice.outstanding], countered: true, limits: m, reason: 'Minimum first payment exceeds the discounted settlement.' };
     parts[0] = money(first);
     const remaining = money(discounted - first);
     for (let i = 1; i < n; i++) parts[i] = money(remaining / (n - 1));
@@ -95,13 +101,35 @@ function decide(invoice, intent) {
   return { pct, n, total: discounted, parts, countered: pct < askedDiscount || n < askedN, limits: m };
 }
 
-function answer(invoice, offer, intent) {
+function answer(offer, intent) {
   if (intent.type === 'discount' && offer.countered) return `I can help with that. The account mandate allows up to ${offer.pct}% off, so I applied the maximum permitted discount.`;
   if (intent.type === 'installments' && offer.countered) return `I can split this into up to ${offer.n} payments under the account mandate. The first payment is ${offer.parts[0].toFixed(2)}.`;
   return `The approved plan is ${offer.n} payment${offer.n === 1 ? '' : 's'}, with ${offer.pct}% discount. The first payment is ${offer.parts[0].toFixed(2)}.`;
 }
 
 function addAudit(event, data) { audit.push({ id: crypto.randomUUID(), at: new Date().toISOString(), event, ...data }); }
+
+function signingSecret() {
+  return process.env.PAYPAL_CLIENT_SECRET || process.env.APP_SIGNING_SECRET || 'chasebot-local-demo-secret';
+}
+
+function signState(payload) {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const sig = crypto.createHmac('sha256', signingSecret()).update(encoded).digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifyState(value) {
+  if (!value || !value.includes('.')) return null;
+  const [encoded, sig] = value.split('.');
+  const expected = crypto.createHmac('sha256', signingSecret()).update(encoded).digest('base64url');
+  if (!crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!payload.exp || Date.now() > payload.exp) return null;
+    return payload;
+  } catch { return null; }
+}
 
 async function paypalToken() {
   const id = process.env.PAYPAL_CLIENT_ID;
@@ -117,30 +145,47 @@ async function createPayPalOrder(invoice, offer) {
   const token = await paypalToken();
   if (!token) return null;
   const appUrl = process.env.APP_URL;
-  if (!appUrl) throw new Error('APP_URL is required for real PayPal sandbox checkout');
+  if (!appUrl || !/^https:\/\//i.test(appUrl)) throw new Error('APP_URL must be an HTTPS public URL for PayPal Sandbox checkout');
   const baseUrl = appUrl.replace(/\/$/, '');
-  const returnParams = `invoice=${encodeURIComponent(invoice.id)}&amount=${encodeURIComponent(offer.parts[0].toFixed(2))}&complete=${offer.n === 1 ? '1' : '0'}`;
+  const state = signState({ invoice: invoice.id, amount: offer.parts[0], complete: offer.n === 1, exp: Date.now() + 15 * 60 * 1000 });
   const r = await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders', {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ intent: 'CAPTURE', purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }], application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${baseUrl}/api/orders/return?${returnParams}`, cancel_url: `${baseUrl}/api/orders/cancel?invoice=${encodeURIComponent(invoice.id)}` } })
+    body: JSON.stringify({
+      intent: 'CAPTURE',
+      purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }],
+      application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${baseUrl}/api/orders/return?state=${encodeURIComponent(state)}`, cancel_url: `${baseUrl}/api/orders/cancel` }
+    })
   });
   if (!r.ok) throw new Error(`PayPal order creation failed (${r.status})`);
   return await r.json();
 }
 
-async function capturePayPalOrder(orderId) {
+async function capturePayPalOrder(orderId, expectedAmount) {
   const token = await paypalToken();
   if (!token) return null;
   const r = await fetch(`https://api-m.sandbox.paypal.com/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' } });
+  const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(`PayPal capture failed (${r.status})`);
-  return await r.json();
+  const captured = Number(data?.purchase_units?.[0]?.payments?.captures?.[0]?.amount?.value);
+  if (!Number.isFinite(captured) || Math.abs(captured - Number(expectedAmount)) > 0.01) throw new Error('Captured amount does not match the server-approved amount');
+  return data;
 }
 
 function mockOrder(invoice, offer) {
   const id = `MOCK-${crypto.randomUUID()}`;
-  mockOrders.set(id, { id, invoiceId: invoice.id, amount: offer.parts[0], status: 'CREATED', complete: offer.n === 1 });
+  mockOrders.set(id, { id, invoiceId: invoice.id, amount: offer.parts[0], status: 'CREATED', complete: offer.n === 1, createdAt: Date.now() });
   return { id, status: 'CREATED', links: [{ rel: 'approve', href: `/api/orders/${id}` }] };
+}
+
+function applyPayment(invoice, orderId, amount, complete, provider) {
+  if (consumedOrders.has(orderId)) return false;
+  const safeAmount = money(amount);
+  if (!Number.isFinite(safeAmount) || safeAmount <= 0 || safeAmount > invoice.outstanding + 0.01) throw new Error('Invalid payment amount');
+  invoice.outstanding = complete ? 0 : money(invoice.outstanding - safeAmount);
+  consumedOrders.add(orderId);
+  addAudit('PAYMENT_CAPTURED', { invoiceId: invoice.id, orderId, amount: safeAmount, complete, provider });
+  return true;
 }
 
 async function handler(req, res) {
@@ -148,7 +193,7 @@ async function handler(req, res) {
     const url = new URL(req.url, `http://${req.headers?.host || 'localhost'}`);
     const parts = url.pathname.split('/').filter(Boolean);
 
-    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'health') return json(res, 200, { ok: true, service: 'ChaseBot', mode: process.env.PAYPAL_CLIENT_ID ? 'paypal-sandbox' : 'mock' });
+    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'health') return json(res, 200, { ok: true, service: 'ChaseBot', mode: process.env.PAYPAL_CLIENT_ID ? 'paypal-sandbox' : 'mock', ai: Boolean(process.env.LLM_API_KEY) });
     if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'invoices' && parts[2]) {
       const invoice = getInvoice(parts[2]);
       if (!invoice) return json(res, 404, { error: 'Invoice not found' });
@@ -160,20 +205,24 @@ async function handler(req, res) {
       const invoice = getInvoice(parts[2]);
       if (!invoice) return json(res, 404, { error: 'Invoice not found' });
       const body = await readBody(req);
-      const intent = (await llmIntent(body.message || '')) || parseIntent(body.message || '');
+      const message = String(body.message || '').slice(0, 1000);
+      if (!message.trim()) return json(res, 400, { error: 'Message is required' });
+      const aiIntent = await llmIntent(message);
+      const intent = aiIntent || parseIntent(message);
       const offer = decide(invoice, intent);
-      const reply = answer(invoice, offer, intent);
-      addAudit('NEGOTIATION', { invoiceId: invoice.id, intent, offer });
-      return json(res, 200, { invoice, intent, offer, reply, ai: Boolean(process.env.LLM_API_KEY) });
+      const reply = answer(offer, intent);
+      addAudit('NEGOTIATION', { invoiceId: invoice.id, intent, offer, source: aiIntent ? 'llm' : 'deterministic-fallback' });
+      return json(res, 200, { invoice, intent, offer, reply, ai: Boolean(aiIntent) });
     }
 
     if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'invoices' && parts[3] === 'accept') {
       const invoice = getInvoice(parts[2]);
       if (!invoice) return json(res, 404, { error: 'Invoice not found' });
+      if (invoice.outstanding <= 0) return json(res, 409, { error: 'Invoice is already settled' });
       const body = await readBody(req);
       const intent = body.intent || parseIntent(body.message || '');
       const offer = decide(invoice, intent); // Never trust client-calculated money.
-      if (offer.total <= 0 || offer.total > invoice.outstanding) return json(res, 400, { error: 'Invalid settlement' });
+      if (!Number.isFinite(offer.total) || offer.total <= 0 || offer.total > invoice.outstanding) return json(res, 400, { error: 'Invalid settlement' });
       let order;
       if (process.env.PAYPAL_CLIENT_ID && process.env.PAYPAL_CLIENT_SECRET) order = await createPayPalOrder(invoice, offer);
       if (!order) order = mockOrder(invoice, offer);
@@ -183,33 +232,27 @@ async function handler(req, res) {
     }
 
     if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'return') {
+      const state = verifyState(url.searchParams.get('state'));
       const token = url.searchParams.get('token');
-      const invoiceId = url.searchParams.get('invoice');
-      const amount = Number(url.searchParams.get('amount') || 0);
-      const complete = url.searchParams.get('complete') === '1';
-      if (token) await capturePayPalOrder(token);
-      if (invoiceId && invoices[invoiceId]) {
-        invoices[invoiceId].outstanding = complete ? 0 : money(Math.max(0, invoices[invoiceId].outstanding - amount));
-        addAudit('PAYMENT_CAPTURED', { invoiceId, orderId: token, amount, complete, provider: 'paypal-sandbox' });
-      }
-      return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(invoiceId || '')}&order=${encodeURIComponent(token || '')}&complete=${complete ? '1' : '0'}`);
+      if (!state || !token || !state.invoice) return json(res, 400, { error: 'Invalid or expired payment state' });
+      const invoice = getInvoice(state.invoice);
+      if (!invoice) return json(res, 404, { error: 'Invoice not found' });
+      if (!consumedOrders.has(token)) await capturePayPalOrder(token, state.amount);
+      applyPayment(invoice, token, state.amount, Boolean(state.complete), 'paypal-sandbox');
+      return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(invoice.id)}&order=${encodeURIComponent(token)}&complete=${state.complete ? '1' : '0'}`);
     }
 
-    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'cancel') return redirect(res, `/pay.html?cancelled=1&invoice=${encodeURIComponent(url.searchParams.get('invoice') || '')}`);
+    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'cancel') return redirect(res, `/pay.html?cancelled=1`);
 
     if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2]) {
       const id = parts[2];
       const mock = mockOrders.get(id);
-      if (mock) {
-        const invoice = getInvoice(mock.invoiceId);
-        if (invoice && mock.status !== 'CAPTURED') {
-          invoice.outstanding = mock.complete ? 0 : money(Math.max(0, invoice.outstanding - mock.amount));
-          mock.status = 'CAPTURED';
-          addAudit('PAYMENT_CAPTURED', { invoiceId: invoice.id, orderId: id, amount: mock.amount, complete: mock.complete, provider: 'mock' });
-        }
-        return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(mock.invoiceId)}&order=${encodeURIComponent(id)}&complete=${mock.complete ? '1' : '0'}`);
-      }
-      return json(res, 404, { error: 'Order not found' });
+      if (!mock) return json(res, 404, { error: 'Order not found' });
+      if (Date.now() - mock.createdAt > 15 * 60 * 1000) return json(res, 410, { error: 'Mock order expired' });
+      const invoice = getInvoice(mock.invoiceId);
+      if (!invoice) return json(res, 404, { error: 'Invoice not found' });
+      if (!consumedOrders.has(id)) applyPayment(invoice, id, mock.amount, mock.complete, 'mock');
+      return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(mock.invoiceId)}&order=${encodeURIComponent(id)}&complete=${mock.complete ? '1' : '0'}`);
     }
 
     return json(res, 404, { error: 'Route not found' });
