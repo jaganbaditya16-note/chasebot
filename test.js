@@ -19,7 +19,13 @@ function call(method,url,b){
   assert.equal(r.code,200);assert.equal(r.json.intent.type,'combined');assert.equal(r.json.offer.pct,8);assert.equal(r.json.offer.n,3);assert(r.json.offer.countered);
   assert(r.json.offer.reasons.includes('DISCOUNT_CAP'));assert(r.json.offer.reasons.includes('INSTALLMENT_CAP'));assert(r.json.offer.reasons.includes('OVERRIDE_ATTEMPT'));
 
-  r=await call('POST','/api/invoices/INV-102/accept',{intent:{type:'discount',discountAsk:50,installmentsAsk:1},decisionId:'DEC-TEST'});
+  r=await call('POST','/api/invoices/INV-102/negotiate',{message:'Can I get 50% off?'});
+  assert.equal(r.code,200);
+  const offerToken=r.json.offerToken;
+  assert.equal(typeof offerToken,'string');
+
+  // Client-supplied money/intent cannot replace the signed offer.
+  r=await call('POST','/api/invoices/INV-102/accept',{offerToken});
   assert.equal(r.code,200);assert.equal(r.json.offer.pct,6);assert.equal(r.json.offer.parts[0],601.6);assert.equal(r.json.provider,'mock');
 
   const mockApproval=r.json.orders[0].url;
@@ -37,6 +43,12 @@ function call(method,url,b){
 
   r=await call('GET','/api/demo/attack-suite');assert.equal(r.code,200);assert.equal(r.json.allBlocked,true);assert.equal(r.json.passed,r.json.total);
   r=await call('POST','/api/invoices/INV-101/negotiate',{message:'   '});assert.equal(r.code,400);
+
+  r=await call('POST','/api/invoices/INV-103/negotiate',{message:'Split into 2 payments'});
+  const validOfferToken=r.json.offerToken;
+  const tamperedOfferToken=validOfferToken.slice(0,-1)+(validOfferToken.endsWith('a')?'b':'a');
+  r=await call('POST','/api/invoices/INV-103/accept',{offerToken:tamperedOfferToken});
+  assert.equal(r.code,400);
 
   r=await call('POST','/api/invoices/INV-104/negotiate',{message:'Can I get 25% off?'});assert.equal(r.code,200);assert.equal(r.json.offer.pct,0);assert.equal(r.json.offer.n,1);
 
