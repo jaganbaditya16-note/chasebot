@@ -156,6 +156,11 @@ async function attackSuite(){
   }
   tests.push({name:'Replay protection',blocked:applied===1&&inv.outstanding===792});
 
+  const conflict=clone(base);
+  conflict.mandate={maxDiscountPct:80,maxInstallments:3,minFirstPaymentPct:40};
+  const impossible=decide(conflict,{type:'combined',discountAsk:80,installmentsAsk:3,redFlags:[]});
+  tests.push({name:'Contradictory policy',blocked:impossible.decision==='blocked'});
+
   return {passed:tests.filter(t=>t.blocked).length,total:tests.length,allBlocked:tests.every(t=>t.blocked),tests};
 }
 
