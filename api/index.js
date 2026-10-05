@@ -118,10 +118,11 @@ async function createPayPalOrder(invoice, offer) {
   if (!token) return null;
   const appUrl = process.env.APP_URL;
   if (!appUrl) throw new Error('APP_URL is required for real PayPal sandbox checkout');
+  const baseUrl = appUrl.replace(/\/$/, '');
   const r = await fetch('https://api-m.sandbox.paypal.com/v2/checkout/orders', {
     method: 'POST',
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ intent: 'CAPTURE', purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }], application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${appUrl.replace(/\/$/, '')}/api/orders/return`, cancel_url: `${appUrl.replace(/\/$/, '')}/api/orders/cancel` } })
+    body: JSON.stringify({ intent: 'CAPTURE', purchase_units: [{ reference_id: invoice.id, description: `ChaseBot settlement ${invoice.id}`, amount: { currency_code: 'USD', value: offer.parts[0].toFixed(2) } }], application_context: { brand_name: 'ChaseBot', user_action: 'PAY_NOW', return_url: `${baseUrl}/api/orders/return?invoice=${encodeURIComponent(invoice.id)}`, cancel_url: `${baseUrl}/api/orders/cancel?invoice=${encodeURIComponent(invoice.id)}` } })
   });
   if (!r.ok) throw new Error(`PayPal order creation failed (${r.status})`);
   return await r.json();
@@ -188,7 +189,7 @@ async function handler(req, res) {
       return redirect(res, `/pay.html?success=1&invoice=${encodeURIComponent(invoiceId || '')}&order=${encodeURIComponent(token || '')}`);
     }
 
-    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'cancel') return redirect(res, '/pay.html?cancelled=1');
+    if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2] === 'cancel') return redirect(res, `/pay.html?cancelled=1&invoice=${encodeURIComponent(url.searchParams.get('invoice') || '')}`);
 
     if (req.method === 'GET' && parts[0] === 'api' && parts[1] === 'orders' && parts[2]) {
       const id = parts[2];
