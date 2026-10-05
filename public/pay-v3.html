@@ -54,7 +54,7 @@
 </main>
 <script>
 const qs=new URLSearchParams(location.search),invoiceId=qs.get('invoice')||'INV-101',chat=document.getElementById('chat'),offerEl=document.getElementById('offer');
-let lastIntent=null,lastDecisionId=null;
+let lastOfferToken=null;
 const money=n=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(Number(n)||0);
 const api=async(p,o)=>{const r=await fetch(p,o),j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||'Request failed');return j};
 const add=(t,me)=>{const d=document.createElement('div');d.className='msg '+(me?'me':'bot');d.textContent=t;chat.appendChild(d);chat.scrollTop=chat.scrollHeight};
@@ -74,8 +74,8 @@ function render(d){
   offerEl.innerHTML='<div class="offer"><div class="head"><div><div class="eyebrow">Server-approved offer</div><h3 style="margin:5px 0">'+money(d.offer.total)+' settlement</h3></div><span class="badge '+tone+'">'+d.offer.decision+'</span></div><p class="muted" style="line-height:1.55">'+d.reply+'</p><div class="boxes"><div class="box"><b>Discount</b><small>'+d.offer.pct+'% · saves '+money(d.offer.savings)+'</small></div><div class="box"><b>Plan</b><small>'+d.offer.n+' payment'+(d.offer.n===1?'':'s')+' · first '+money(d.offer.parts[0])+'</small></div></div><div class="parts">'+parts+'</div><div class="checks">'+checks+'</div><div class="small muted" style="margin-top:11px">Decision '+d.decisionId+' · '+d.offer.reasons.join(', ')+'</div>'+(d.offer.decision!=='blocked'?'<button id="accept" class="btn pay">Accept plan & continue to PayPal</button>':'')+'</div>';
   const a=document.getElementById('accept');if(a)a.onclick=accept;
 }
-async function negotiate(v){const input=document.getElementById('message'),msg=(v||input.value).trim();if(!msg)return;add(msg,true);input.value='';try{const d=await api('/api/invoices/'+encodeURIComponent(invoiceId)+'/negotiate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:msg})});lastIntent=d.intent;lastDecisionId=d.decisionId;add(d.reply);render(d)}catch(e){add(e.message)}}
-async function accept(){try{const d=await api('/api/invoices/'+encodeURIComponent(invoiceId)+'/accept',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({intent:lastIntent,decisionId:lastDecisionId})});location.href=d.orders[0].url}catch(e){add(e.message)}}
+async function negotiate(v){const input=document.getElementById('message'),msg=(v||input.value).trim();if(!msg)return;add(msg,true);input.value='';try{const d=await api('/api/invoices/'+encodeURIComponent(invoiceId)+'/negotiate',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({message:msg})});lastOfferToken=d.offerToken;add(d.reply);render(d)}catch(e){add(e.message)}}
+async function accept(){try{const d=await api('/api/invoices/'+encodeURIComponent(invoiceId)+'/accept',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({offerToken:lastOfferToken})});location.href=d.orders[0].url}catch(e){add(e.message)}}
 document.getElementById('send').onclick=()=>negotiate();
 document.getElementById('message').addEventListener('keydown',e=>{if(e.key==='Enter')negotiate()});
 document.querySelectorAll('[data-msg]').forEach(b=>b.onclick=()=>negotiate(b.dataset.msg));
